@@ -755,7 +755,7 @@ function rebuildLabelItems() {
   };
 
   // orden = prioridad: si dos etiquetas chocan en pantalla, gana la que va antes
-  items.push({ sun: true, text: SELF_ID ? '@' + SELF_ID : 'tú', cls: 'sun', off: 'translate(-50%, 34px)' });
+  items.push({ sun: true, text: SELF_ID ? '@' + SELF_ID : 'tvh', cls: 'sun', off: 'translate(-50%, 34px)' });
 
   const sel = state.selectedId;
   if (sel) addStar(sel, 'sel');
