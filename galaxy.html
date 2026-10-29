@@ -87,6 +87,7 @@
         <button id="raysBtn" class="active">RAYOS: TODOS</button>
         <button id="ringsBtn" class="active">ANILLOS</button>
         <span class="toolbar-sep"></span>
+        <button id="shapeBtn">FORMA: ESFERA</button>
         <button id="scaleBtn">ESCALA: LOG</button>
         <button id="colorBtn">COLOR: STATUS</button>
       </div>
@@ -114,7 +115,7 @@
         </div>
         <div class="legend-sep"></div>
         <div class="legend-row"><span class="legend-sun"></span>tú (self)</div>
-        <div class="legend-row"><span class="legend-ring"></span>distancia al sol = tiempo desde el follow</div>
+        <div class="legend-row"><span class="legend-ring"></span>distancia 3D al sol = tiempo desde el follow</div>
         <div class="legend-row"><span class="legend-line"></span>follows (A sigue a B)</div>
         <div class="legend-row"><span class="legend-line dashed"></span>origen (cacheado desde)</div>
         <div class="legend-hint">arrastra = orbitar · rueda = zoom<br>der/shift = mover · esc = soltar</div>
@@ -160,6 +161,9 @@
             <button class="btn" id="pathBtn">TRACE PATH</button>
             <button class="btn secondary" id="pathClearBtn">CLEAR</button>
           </div>
+          <label class="path-via-self" style="display:flex;align-items:center;gap:8px;font-size:10px;letter-spacing:0.1em;text-transform:uppercase;color:var(--muted);cursor:pointer;">
+            <input type="checkbox" id="pathViaSelf" checked style="accent-color:#E8FF00;cursor:pointer;"> pasar por ti (tus follows / mutuals) · escribe "tú" para usarte
+          </label>
           <div class="path-result" id="pathResult">
             <div class="path-empty">enter two usernames to find connection</div>
           </div>

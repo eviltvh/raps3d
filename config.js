@@ -19,5 +19,5 @@ window.POLPO_NETWORK_CONFIG = {
 
   // galaxy.html: tu username (sin @). Es el sol; si aparece en los datos se funde con él.
   // Vacío = el sol se llama "tú".
-  SELF_USERNAME: 'tvh'
+  SELF_USERNAME: ''
 };

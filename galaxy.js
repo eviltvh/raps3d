@@ -8,20 +8,25 @@
    y el objeto global `state`. Solo cambia el render, así que
    las redes / tiers / dead families son idénticos a la vista 2D.
 
-   Layout
-   ──────
+   Layout (FORMA: ESFERA, default)
+   ───────────────────────────────
      SOL      = tú (self). Si pones SELF_USERNAME en config.js y
                 ese user aparece en los datos, se funde con el sol.
-     RADIO    = tiempo desde el follow.  Fecha que se usa, en orden:
+     DISTANCIA 3D AL SOL = tiempo desde el follow.  Fecha que se usa, en orden:
                   followed_at → mutual_checked_at → red.checked_at
                   → last_updated → mediana de sus vecinos (inferida)
                 Sin ninguna fecha → banda exterior "sin fecha".
                 Escala LOG (default; separa bien lo reciente) o LINEAL.
-     ÁNGULO   = su red. Cada comunidad de Louvain con ≥ 3 miembros
-                es un BRAZO espiral; el brazo se enrolla con el
-                radio (espiral logarítmica). Los sueltos toman el
-                ángulo promedio de sus vecinos, o uno fijo por hash.
-     ALTURA   = grosor del disco, crece con el radio.
+     DIRECCIÓN = su red. Cada comunidad de Louvain con ≥ 3 miembros
+                es un BRAZO: un cono que sale del sol hacia una
+                dirección del cielo. Redes conectadas quedan con
+                direcciones vecinas; los brazos se enroscan alrededor
+                del eje Y conforme se alejan. Los sueltos toman la
+                dirección promedio de sus vecinos, o una fija por hash.
+     FORMA: DISCO = la versión plana (ángulo en el plano + grosor).
+
+   PATH    pasa por ti (nodo virtual unido a quien sigues / te sigue),
+           así dos mutuals tuyos quedan a 2 saltos. Lógica en dashboard.js.
    Todo es determinista (seed = hash del username): recargar no
    reacomoda la galaxia.
 
@@ -49,16 +54,19 @@ const GX = {
   UNDATED: 1.14,     // banda exterior para sin fecha (× RMAX)
   twist: 1.35,       // qué tanto se enrolla un brazo (rad por unidad de log)
   armSpread: 0.28,   // ancho angular del brazo (fracción de su sector)
-  thick: 0.045,      // grosor del disco ∝ radio
+  thick: 0.045,      // grosor del disco ∝ radio (solo FORMA: DISCO)
+  twist3: 0.75,      // remolino de los brazos en la esfera (rad por unidad de log, eje Y)
   sizeK: 1150,       // tamaño de estrella en pantalla
   dimAlpha: 0.07,
   rotateSpeed: 0.28,
 };
 
-// cámara inicial: inclinada ~35° sobre el disco, con toda la galaxia en cuadro
+// cámara inicial con toda la galaxia en cuadro
 const HOME_CAM = (aspect = 1.6) => {
   const k = aspect < 1 ? clamp(0.92 / aspect, 1, 2) : 1;   // pantallas angostas: alejarse
-  return [0, GX.RMAX * 1.12 * k, GX.RMAX * 1.62 * k];
+  if (gx.shape === 'disc') return [0, GX.RMAX * 1.12 * k, GX.RMAX * 1.62 * k];
+  const d = new THREE.Vector3(0.38, 0.42, 1).normalize().multiplyScalar(GX.RMAX * 2.15 * k);
+  return [d.x, d.y, d.z];
 };
 
 const RING_MARKS = [
@@ -73,6 +81,7 @@ const gx = {
   arms: [], armOf: new Map(),
   pos: null, anim: null, fly: null,
   maxDays: 1, scale: 'log', rays: 'all',
+  shape: 'sphere',        // 'sphere' (volumen real: distancia 3D = tiempo) | 'disc'
   showRings: true, autoRotate: true,
   hoverId: null, alpha: null,
   followPairs: [], origenPairs: [], rayIdx: [],
@@ -221,10 +230,157 @@ function computeArms() {
   arms.forEach(a => a.ids.forEach(id => armOf.set(id, a)));
   gx.arms = arms;
   gx.armOf = armOf;
+
+  sphereArmDirs(ordered, w, W);
+}
+
+// En la esfera cada brazo es una DIRECCIÓN desde el sol (un cono que sale
+// hacia afuera). Arranque en espiral de Fibonacci y luego una relajación:
+// brazos conectados se atraen (∝ log de # aristas entre ellos), todos se
+// repelen según su tamaño. Así redes relacionadas quedan vecinas en el cielo.
+function sphereArmDirs(ordered, w, W) {
+  const K = ordered.length;
+  if (!K) return;
+  const golden = Math.PI * (3 - Math.sqrt(5));
+  const off = hashStr('polpo') % 628 / 100;
+  ordered.forEach(a => {
+    const frac = w(a) / W;
+    a.cap = Math.acos(clamp(1 - 2 * frac, -1, 1));       // radio angular de un casquete con ese % del cielo
+    a.spread3 = clamp(a.cap * 0.5, 0.07, 0.55);
+  });
+  const P = ordered.map((a, k) => {
+    const y = K === 1 ? 0.25 : 1 - 2 * (k + 0.5) / K;
+    const r = Math.sqrt(Math.max(0, 1 - y * y));
+    const f = k * golden + off;
+    return new THREE.Vector3(Math.cos(f) * r, y * 0.9, Math.sin(f) * r).normalize();
+  });
+
+  const ix = new Map(ordered.map((a, k) => [a, k]));
+  const cnt = new Map();
+  state.links.forEach(l => {
+    const A = gx.armOf.get(idOf(l.source)), B = gx.armOf.get(idOf(l.target));
+    if (!A || !B || A === B) return;
+    const a = ix.get(A), b = ix.get(B);
+    const key = Math.min(a, b) * 65536 + Math.max(a, b);
+    cnt.set(key, (cnt.get(key) || 0) + 1);
+  });
+  const pairs = Array.from(cnt, ([key, k]) => [Math.floor(key / 65536), key % 65536, Math.log1p(k)]);
+
+  const F = P.map(() => new THREE.Vector3());
+  const d = new THREE.Vector3();
+  for (let it = 0; it < 220; it++) {
+    const cool = 1 - it / 220;
+    F.forEach(f => f.set(0, 0, 0));
+    for (let i = 0; i < K; i++) {
+      for (let j = i + 1; j < K; j++) {
+        d.subVectors(P[i], P[j]);
+        const len2 = Math.max(1e-4, d.lengthSq());
+        const want = ordered[i].cap + ordered[j].cap;
+        const rep = 0.006 * (0.3 + want * want) / len2;
+        F[i].addScaledVector(d, rep);
+        F[j].addScaledVector(d, -rep);
+      }
+    }
+    for (const [a, b, wt] of pairs) {
+      d.subVectors(P[b], P[a]);
+      const minD = ordered[a].cap + ordered[b].cap;
+      if (d.length() < minD) continue;
+      F[a].addScaledVector(d, 0.03 * wt);
+      F[b].addScaledVector(d, -0.03 * wt);
+    }
+    for (let i = 0; i < K; i++) {
+      const f = F[i];
+      const L = f.length();
+      if (L > 0.12) f.multiplyScalar(0.12 / L);
+      P[i].addScaledVector(f, cool).normalize();
+    }
+  }
+
+  ordered.forEach((a, k) => {
+    const dir = P[k];
+    const up = Math.abs(dir.y) < 0.95 ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0);
+    const t1 = new THREE.Vector3().crossVectors(dir, up).normalize();
+    const t2 = new THREE.Vector3().crossVectors(dir, t1).normalize();
+    a.dir = dir; a.t1 = t1; a.t2 = t2;
+  });
 }
 
 // ─── LAYOUT ──────────────────────────────────────────────
 function computeLayout(scale) {
+  return gx.shape === 'disc' ? computeLayoutDisc(scale) : computeLayoutSphere(scale);
+}
+
+function nodeRadiusAt(n, i, scale) {
+  const r = radiusOf(gx.time.get(n.id)?.age, scale);
+  return r == null ? GX.RMAX * GX.UNDATED + gx.seeds[i].u2 * 30 : r;
+}
+
+// ESFERA: |posición| = radio del tiempo (distancia 3D real al sol);
+// la dirección la pone su red; los brazos se enroscan alrededor del eje Y.
+function computeLayoutSphere(scale) {
+  const N = gx.order.length;
+  const out = new Float32Array(N * 3);
+  const rad = new Float32Array(N);
+  const dir = new Float32Array(N * 3);
+  const has = new Uint8Array(N);
+
+  gx.order.forEach((n, i) => {
+    const s = gx.seeds[i];
+    rad[i] = nodeRadiusAt(n, i, scale);
+    const a = gx.armOf.get(n.id);
+    if (!a || !a.dir) return;
+    const sp = a.spread3;
+    let x = a.dir.x + (a.t1.x * s.ga + a.t2.x * s.gb) * sp;
+    let y = a.dir.y + (a.t1.y * s.ga + a.t2.y * s.gb) * sp;
+    let z = a.dir.z + (a.t1.z * s.ga + a.t2.z * s.gb) * sp;
+    const L = Math.hypot(x, y, z) || 1;
+    dir[i * 3] = x / L; dir[i * 3 + 1] = y / L; dir[i * 3 + 2] = z / L;
+    has[i] = 1;
+  });
+
+  // sueltos: dirección promedio de sus vecinos ya ubicados (2 pasadas)
+  for (let pass = 0; pass < 2; pass++) {
+    gx.order.forEach((n, i) => {
+      if (has[i] === 1) return;
+      let x = 0, y = 0, z = 0, c = 0;
+      state.adj.get(n.id)?.forEach(m => {
+        const j = gx.idx.get(m);
+        if (j == null || !has[j] || m === SELF_ID) return;
+        x += dir[j * 3]; y += dir[j * 3 + 1]; z += dir[j * 3 + 2]; c++;
+      });
+      const L = Math.hypot(x, y, z);
+      if (!c || L < 0.05) return;
+      const s = gx.seeds[i];
+      x = x / L + s.ga * 0.14; y = y / L + s.gy * 0.14; z = z / L + s.gb * 0.14;
+      const L2 = Math.hypot(x, y, z) || 1;
+      dir[i * 3] = x / L2; dir[i * 3 + 1] = y / L2; dir[i * 3 + 2] = z / L2;
+      has[i] = 2;
+    });
+  }
+
+  gx.order.forEach((n, i) => {
+    if (n.id === SELF_ID) return;   // se queda en 0,0,0 (el sol)
+    const s = gx.seeds[i];
+    let x, y, z;
+    if (has[i]) { x = dir[i * 3]; y = dir[i * 3 + 1]; z = dir[i * 3 + 2]; }
+    else {
+      // sin red ni vecinos: dirección uniforme en la esfera
+      y = 2 * s.u - 1;
+      const rr = Math.sqrt(1 - y * y), f = 2 * Math.PI * s.u3;
+      x = rr * Math.cos(f); z = rr * Math.sin(f);
+    }
+    const r = rad[i];
+    const tw = GX.twist3 * Math.log1p(r / GX.R0);
+    const c = Math.cos(tw), sn = Math.sin(tw);
+    out[i * 3] = (x * c - z * sn) * r;
+    out[i * 3 + 1] = y * r;
+    out[i * 3 + 2] = (x * sn + z * c) * r;
+  });
+  return out;
+}
+
+// DISCO: la versión plana original (radio en el plano + grosor)
+function computeLayoutDisc(scale) {
   const N = gx.order.length;
   const out = new Float32Array(N * 3);
   const rad = new Float32Array(N);
@@ -232,8 +388,7 @@ function computeLayout(scale) {
 
   gx.order.forEach((n, i) => {
     const s = gx.seeds[i];
-    let r = radiusOf(gx.time.get(n.id)?.age, scale);
-    if (r == null) r = GX.RMAX * GX.UNDATED + s.u2 * 30;
+    const r = nodeRadiusAt(n, i, scale);
     rad[i] = r;
     const arm = gx.armOf.get(n.id);
     if (arm) th[i] = arm.base + GX.twist * Math.log1p(r / GX.R0) + s.ga * arm.spread;
@@ -291,6 +446,8 @@ const STAR_VS = `
   attribute vec3 aColor;
   uniform float uK;
   uniform float uMin;
+  uniform float uNear;   // profundidad: lo del fondo de la esfera se apaga
+  uniform float uFar;
   varying vec3 vColor;
   varying float vAlpha;
   varying float vHollow;
@@ -300,7 +457,8 @@ const STAR_VS = `
     gl_PointSize = clamp(s, uMin, 96.0);
     gl_Position = projectionMatrix * mv;
     vColor = aColor;
-    vAlpha = aAlpha * (s < uMin ? max(0.35, s / uMin) : 1.0);
+    float depth = 1.0 - 0.72 * smoothstep(uNear, uFar, -mv.z);
+    vAlpha = aAlpha * depth * (s < uMin ? max(0.35, s / uMin) : 1.0);
     vHollow = aHollow;
   }
 `;
@@ -329,7 +487,10 @@ const STAR_FS = `
 
 function makeStarMaterial(pr) {
   return new THREE.ShaderMaterial({
-    uniforms: { uK: { value: GX.sizeK * pr }, uMin: { value: 2.2 * pr } },
+    uniforms: {
+      uK: { value: GX.sizeK * pr }, uMin: { value: 2.2 * pr },
+      uNear: { value: 1e8 }, uFar: { value: 1e9 },     // sin atenuar hasta que el loop lo ajuste
+    },
     vertexShader: STAR_VS,
     fragmentShader: STAR_FS,
     transparent: true,
@@ -364,6 +525,8 @@ function initScene() {
   stage.appendChild(renderer.domElement);
 
   const scene = new THREE.Scene();
+  // niebla negra = con blending aditivo, lo lejano se apaga (cue de profundidad para las líneas)
+  scene.fog = new THREE.Fog(0x000000, 1e8, 1e9);
   const camera = new THREE.PerspectiveCamera(52, w / h, 1, 20000);
   camera.position.set(...HOME_CAM(w / h));
 
@@ -392,7 +555,7 @@ function initScene() {
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.BufferAttribute(p, 3));
     gx.bg = new THREE.Points(g, new THREE.PointsMaterial({
-      color: 0x5a5a66, size: 1.3, sizeAttenuation: false, transparent: true, opacity: 0.7, depthWrite: false,
+      color: 0x5a5a66, size: 1.3, sizeAttenuation: false, transparent: true, opacity: 0.7, depthWrite: false, fog: false,
     }));
     scene.add(gx.bg);
   }
@@ -400,22 +563,23 @@ function initScene() {
   // halo tenue del disco
   {
     const tex = glowTexture([[0, 'rgba(255,240,200,0.55)'], [0.18, 'rgba(255,200,120,0.18)'], [0.55, 'rgba(120,110,160,0.05)'], [1, 'rgba(0,0,0,0)']]);
-    const m = new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, opacity: 0.55, side: THREE.DoubleSide });
+    const m = new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, opacity: 0.55, side: THREE.DoubleSide, fog: false });
     gx.disc = new THREE.Mesh(new THREE.PlaneGeometry(GX.RMAX * 2.5, GX.RMAX * 2.5), m);
     gx.disc.rotation.x = -Math.PI / 2;
+    gx.disc.visible = gx.shape === 'disc';
     scene.add(gx.disc);
   }
 
   // el SOL (self)
   {
     const tex = glowTexture([[0, 'rgba(255,255,255,1)'], [0.12, 'rgba(255,246,200,1)'], [0.3, 'rgba(255,200,80,0.55)'], [0.6, 'rgba(255,140,0,0.12)'], [1, 'rgba(0,0,0,0)']]);
-    gx.sun = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true }));
+    gx.sun = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, fog: false }));
     gx.sun.scale.set(110, 110, 1);
     scene.add(gx.sun);
-    gx.sunHalo = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, opacity: 0.22 }));
+    gx.sunHalo = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, opacity: 0.22, fog: false }));
     gx.sunHalo.scale.set(330, 330, 1);
     scene.add(gx.sunHalo);
-    gx.sunCore = new THREE.Mesh(new THREE.SphereGeometry(8, 24, 16), new THREE.MeshBasicMaterial({ color: 0xfff6d8 }));
+    gx.sunCore = new THREE.Mesh(new THREE.SphereGeometry(8, 24, 16), new THREE.MeshBasicMaterial({ color: 0xfff6d8, fog: false }));
     scene.add(gx.sunCore);
   }
 
@@ -515,7 +679,7 @@ function rebuildRayIdx() {
   if (gx.rays === 'off') return;
   gx.order.forEach((d, i) => {
     if (d.id === SELF_ID) return;
-    if (gx.rays === 'yours' && !isYours(d)) return;
+    if (gx.rays === 'yours' && !selfTie(d)) return;
     gx.rayIdx.push(i);
   });
   gx.rayLines.geometry.setDrawRange(0, gx.rayIdx.length * 2);
@@ -617,11 +781,15 @@ function buildRings() {
     const pts = [];
     for (let k = 0; k <= 160; k++) {
       const t = k / 160 * Math.PI * 2;
-      pts.push(new THREE.Vector3(Math.cos(t) * r, 0, Math.sin(t) * r));
+      // esfera: círculo en XY que se gira cada frame hacia la cámara (= silueta de la cáscara de ese radio)
+      // disco: círculo en el plano del disco
+      pts.push(gx.shape === 'disc'
+        ? new THREE.Vector3(Math.cos(t) * r, 0, Math.sin(t) * r)
+        : new THREE.Vector3(Math.cos(t) * r, Math.sin(t) * r, 0));
     }
     const g = new THREE.BufferGeometry().setFromPoints(pts);
     const line = new THREE.Line(g, new THREE.LineDashedMaterial({
-      color, dashSize: 6, gapSize: 7, transparent: true, opacity, depthWrite: false,
+      color, dashSize: 6, gapSize: 7, transparent: true, opacity, depthWrite: false, fog: false,
     }));
     line.computeLineDistances();
     group.add(line);
@@ -663,6 +831,7 @@ function applyHighlights() {
     if (search && !d.id.toLowerCase().includes(search)) dim = true;
     if (focus && !focus.set.has(d.id)) dim = true;
     if (sel) dim = !(d.id === sel || neighbors.has(d.id));
+    else if (path.size) dim = true;          // con path activo solo se ve el path
     if (path.has(d.id)) dim = false;
     gx.alpha[i] = dim ? GX.dimAlpha : 1;
   });
@@ -682,19 +851,25 @@ function updateHlLines() {
   const sel = state.selectedId;
   const ordered = state.pathOrdered || [];
   const pathPairs = new Set();
+  // el path se dibuja salto por salto (incluye los saltos por ti, que no son aristas del grafo)
   for (let i = 0; i < ordered.length - 1; i++) {
     pathPairs.add(`${ordered[i]}|${ordered[i + 1]}`);
     pathPairs.add(`${ordered[i + 1]}|${ordered[i]}`);
+    segs.push([ordered[i], ordered[i + 1], 0xFF00B3]);
   }
-  state.links.forEach(l => {
-    const s = idOf(l.source), t = idOf(l.target);
-    if (pathPairs.has(`${s}|${t}`)) segs.push([s, t, 0xFF00B3]);
-    else if (sel && (s === sel || t === sel)) {
+  if (sel) {
+    state.links.forEach(l => {
+      const s = idOf(l.source), t = idOf(l.target);
+      if (s !== sel && t !== sel) return;
+      if (pathPairs.has(`${s}|${t}`)) return;
       if (!state.showFollows && !l.types.has('origen')) return;
       segs.push([s, t, l.types.has('follows') ? 0xE8FF00 : 0x8a9400]);
+    });
+    // su lazo contigo (rayo dorado)
+    if (sel !== SELF_KEY && selfTie(state.nodeMap.get(sel)) && !pathPairs.has(`${SELF_KEY}|${sel}`)) {
+      segs.push([SELF_KEY, sel, 0xffd36b]);
     }
-  });
-  if (sel && sel !== SELF_ID && isYours(state.nodeMap.get(sel))) segs.push([SELF_ID || '__sun__', sel, 0xffd36b]);
+  }
 
   const need = segs.length * 6;
   let g = gx.hlLines.geometry;
@@ -755,7 +930,7 @@ function rebuildLabelItems() {
   };
 
   // orden = prioridad: si dos etiquetas chocan en pantalla, gana la que va antes
-  items.push({ sun: true, text: SELF_ID ? '@' + SELF_ID : 'tvh', cls: 'sun', off: 'translate(-50%, 34px)' });
+  items.push({ sun: true, text: SELF_ID ? '@' + SELF_ID : 'tú', cls: 'sun', off: 'translate(-50%, 34px)' });
 
   const sel = state.selectedId;
   if (sel) addStar(sel, 'sel');
@@ -843,7 +1018,10 @@ function drawLabels() {
   gx.labelItems.forEach((it, k) => {
     const el = gx.labelPool[k];
     if (it.sun) _v.set(0, 0, 0);
-    else if (it.ring != null) _v.set(Math.cos(ang + 0.35) * it.ring, 0, Math.sin(ang + 0.35) * it.ring);
+    else if (it.ring != null) {
+      if (gx.shape === 'disc') _v.set(Math.cos(ang + 0.35) * it.ring, 0, Math.sin(ang + 0.35) * it.ring);
+      else _v.set(Math.cos(-0.5) * it.ring, Math.sin(-0.5) * it.ring, 0).applyQuaternion(cam.quaternion);   // abajo-derecha del círculo
+    }
     else if (it.xyz) _v.set(it.xyz[0], it.xyz[1], it.xyz[2]);
     else _v.set(gx.pos[it.i * 3], gx.pos[it.i * 3 + 1], gx.pos[it.i * 3 + 2]);
     const dist = cam.position.distanceTo(_v);
@@ -939,8 +1117,10 @@ function flyToMembers(ids) {
   const pts = [];
   ids.forEach(id => {
     const i = gx.idx.get(id);
-    if (i == null || id === SELF_ID) return;
-    const p = [gx.pos[i * 3], gx.pos[i * 3 + 1], gx.pos[i * 3 + 2]];
+    let p;
+    if (id === SELF_KEY) p = [0, 0, 0];
+    else if (i == null) return;
+    else p = [gx.pos[i * 3], gx.pos[i * 3 + 1], gx.pos[i * 3 + 2]];
     pts.push(p); x += p[0]; y += p[1]; z += p[2]; c++;
   });
   if (!c) return;
@@ -988,6 +1168,16 @@ function animate() {
   }
 
   gx.controls.update();
+
+  // profundidad: atenuar lo que queda detrás del sol (relativo a la distancia de cámara)
+  const camD = gx.camera.position.length();
+  const near = Math.max(1, camD - GX.RMAX * 0.55), far = camD + GX.RMAX * 1.25;
+  gx.starMat.uniforms.uNear.value = near;
+  gx.starMat.uniforms.uFar.value = far;
+  gx.scene.fog.near = near;
+  gx.scene.fog.far = far + GX.RMAX * 0.9;
+  if (gx.ringGroup && gx.shape !== 'disc') gx.ringGroup.quaternion.copy(gx.camera.quaternion);
+
   gx.renderer.render(gx.scene, gx.camera);
   drawLabels();
 }
@@ -1061,7 +1251,10 @@ function selectStar(id) {
   renderNodeInfoG();
   applyHighlights();
 }
-function jump(id) { selectStar(id); flyToNode(id); }
+function jump(id) {
+  if (id === SELF_KEY && !state.nodeMap.has(id)) { selectStar(null); flyTo([0, 0, 0], 260); return; }
+  selectStar(id); flyToNode(id);
+}
 
 function renderNodeInfoG() {
   const box = document.getElementById('nodeInfo');
@@ -1086,6 +1279,8 @@ function renderNodeInfoG() {
     html += `<dt>fecha</dt><dd>${new Date(t.t).toISOString().slice(0, 10)} <span class="time-chip">${t.src}</span></dd>`;
   } else html += `<dt>órbita</dt><dd class="pink">sin fecha · banda exterior</dd>`;
 
+  const tie = selfTie(d);
+  if (d.id !== SELF_KEY) html += `<dt>contigo</dt><dd class="${tie === 'mutual' ? 'accent' : tie ? '' : 'pink'}">${tie === 'mutual' ? '⇅ mutual' : tie === 'sigues' ? 'lo sigues' : tie === 'te sigue' ? 'te sigue' : 'sin lazo directo'}</dd>`;
   if (state.deadSet.has(d.id)) html += `<dt>family</dt><dd style="color:${DEAD_COLOR};">dead branch</dd>`;
   if (net) {
     html += `<dt>brazo</dt><dd><span class="tier-badge tier-${net.tier}" data-net="${net.id}">${TIER[net.tier].label}</span> @${escapeHtml(net.name)}</dd>`;
@@ -1220,18 +1415,19 @@ function runSearchG() {
 }
 
 function tracePathG() {
-  const fromId = document.getElementById('pathFrom').value.trim().replace(/^@/, '');
-  const toId = document.getElementById('pathTo').value.trim().replace(/^@/, '');
+  const fromId = resolvePathInput(document.getElementById('pathFrom').value);
+  const toId = resolvePathInput(document.getElementById('pathTo').value);
   const out = document.getElementById('pathResult');
 
   if (!fromId || !toId) {
     out.innerHTML = '<div class="path-empty">enter two usernames to find connection</div>';
     return;
   }
-  if (!state.nodeMap.has(fromId)) { out.innerHTML = `<div class="path-fail">@${escapeHtml(fromId)} not in graph</div>`; return; }
-  if (!state.nodeMap.has(toId)) { out.innerHTML = `<div class="path-fail">@${escapeHtml(toId)} not in graph</div>`; return; }
+  if (!pathNodeExists(fromId)) { out.innerHTML = `<div class="path-fail">@${escapeHtml(fromId)} not in graph</div>`; return; }
+  if (!pathNodeExists(toId)) { out.innerHTML = `<div class="path-fail">@${escapeHtml(toId)} not in graph</div>`; return; }
 
-  const path = shortestPath(state.adj, fromId, toId);
+  // con "pasar por ti": dos mutuals tuyos quedan a 2 saltos (A → tú → B)
+  const path = shortestPath(pathAdjacency(state.pathViaSelf), fromId, toId);
   if (!path) {
     out.innerHTML = `<div class="path-fail">no path · disconnected</div>`;
     state.pathIds = new Set();
@@ -1247,9 +1443,9 @@ function tracePathG() {
   path.forEach((id, i) => {
     const age = gx.time.get(id)?.age;
     html += `<div class="path-step" data-id="${escapeHtml(id)}">
-      <span class="num">${String(i + 1).padStart(2, '0')}</span><span>@${escapeHtml(id)}</span>${age != null ? `<span class="time-chip">${fmtAge(age)}</span>` : ''}
+      <span class="num">${String(i + 1).padStart(2, '0')}</span><span>${escapeHtml(pathName(id))}</span>${age != null ? `<span class="time-chip">${fmtAge(age)}</span>` : ''}
     </div>`;
-    if (i < path.length - 1) html += `<div class="path-arrow">${relationLabel(path[i], path[i + 1])}</div>`;
+    if (i < path.length - 1) html += `<div class="path-arrow">${pathRelationLabel(path[i], path[i + 1])}</div>`;
   });
   out.innerHTML = html;
   out.querySelectorAll('.path-step').forEach(el => {
@@ -1305,6 +1501,17 @@ function setScale(scale) {
   const to = computeLayout(scale);
   gx.anim = { t0: performance.now(), dur: 1100, from: gx.pos.slice(), to };
   buildRings();
+}
+
+function setShape(shape) {
+  if (shape === gx.shape) return;
+  gx.shape = shape;
+  const to = computeLayout(gx.scale);
+  gx.anim = { t0: performance.now(), dur: 1300, from: gx.pos.slice(), to };
+  gx.disc.visible = shape === 'disc';
+  gx.ringGroup.quaternion.identity();
+  buildRings();
+  resetView();
 }
 
 function wireUI() {
@@ -1366,6 +1573,19 @@ function wireUI() {
     scaleBtn.textContent = gx.scale === 'log' ? 'ESCALA: LOG' : 'ESCALA: LINEAL';
   };
 
+  const shapeBtn = document.getElementById('shapeBtn');
+  if (shapeBtn) {
+    const txt = () => { shapeBtn.textContent = gx.shape === 'disc' ? 'FORMA: DISCO' : 'FORMA: ESFERA'; };
+    txt();
+    shapeBtn.onclick = () => { setShape(gx.shape === 'disc' ? 'sphere' : 'disc'); txt(); };
+  }
+
+  const via = document.getElementById('pathViaSelf');
+  if (via) {
+    via.checked = state.pathViaSelf !== false;
+    via.onchange = () => { state.pathViaSelf = via.checked; if (state.pathOrdered.length) tracePathG(); };
+  }
+
   const colorBtn = document.getElementById('colorBtn');
   const paint = () => {
     colorBtn.textContent = state.colorMode === 'network' ? 'COLOR: RED' : 'COLOR: STATUS';
@@ -1422,7 +1642,7 @@ function buildGalaxy(rows, extras = {}) {
   gx.idx = new Map(nodes.map((n, i) => [n.id, i]));
   gx.seeds = nodes.map(n => {
     const rnd = mulberry32(hashStr(n.id));
-    return { ga: gauss(rnd), gy: gauss(rnd), u: rnd(), u2: rnd() };
+    return { ga: gauss(rnd), gy: gauss(rnd), u: rnd(), u2: rnd(), gb: gauss(rnd), u3: rnd() };
   });
 
   computeTimes();

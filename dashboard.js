@@ -123,6 +123,7 @@ const state = {
   showFollows: true,
   showHulls: true,
   colorMode: 'status',     // 'status' | 'network'
+  pathViaSelf: true,       // el path puede pasar por ti (tus follows / mutuals)
   frozen: false,
   hasFollowData: false,
 };
@@ -692,6 +693,67 @@ function shortestPath(adj, fromId, toId) {
   return null;
 }
 
+// ─── TÚ (SELF) EN EL PATH ────────────────────────────────
+// El grafo no trae aristas hacia ti: un mutual tuyo y otro mutual tuyo
+// no tenían conexión directa, y el BFS daba rodeos por la red.
+// Aquí se agrega un nodo virtual SELF unido a todos los que sigues
+// (mutual / active / external) y a los que te siguen (red.follows_you),
+// así dos mutuals quedan a 2 saltos: A → tú → B.
+// Si config.SELF_USERNAME existe en los datos, ese nodo ES el self.
+const SELF_ID = String((window.POLPO_NETWORK_CONFIG || {}).SELF_USERNAME || '').trim().replace(/^@/, '');
+const SELF_KEY = SELF_ID || '__self__';
+
+function selfTie(n) {
+  if (!n || n.id === SELF_KEY) return null;
+  if (n.mutual) return 'mutual';
+  const yours = isYours(n), back = n.red?.follows_you === true;
+  if (yours && back) return 'mutual';
+  if (yours) return 'sigues';
+  if (back) return 'te sigue';
+  return null;
+}
+
+function pathAdjacency(viaSelf = true) {
+  if (!viaSelf) return state.adj;
+  const adj = new Map();
+  state.adj.forEach((s, k) => adj.set(k, new Set(s)));
+  if (!adj.has(SELF_KEY)) adj.set(SELF_KEY, new Set());
+  const me = adj.get(SELF_KEY);
+  state.nodes.forEach(n => {
+    if (!selfTie(n)) return;
+    me.add(n.id);
+    adj.get(n.id)?.add(SELF_KEY);
+  });
+  return adj;
+}
+
+function resolvePathInput(s) {
+  const v = String(s || '').trim().replace(/^@/, '');
+  if (/^(tú|tu|yo|self|me|sol)$/i.test(v)) return SELF_KEY;
+  return v;
+}
+function pathNodeExists(id) { return id === SELF_KEY || state.nodeMap.has(id); }
+function pathName(id) {
+  if (id !== SELF_KEY) return '@' + id;
+  return SELF_ID ? `@${SELF_ID} (tú)` : '☉ tú';
+}
+
+// relationLabel + saltos hacia/desde ti
+function pathRelationLabel(a, b) {
+  if (a !== SELF_KEY && b !== SELF_KEY) return relationLabel(a, b);
+  const fromMe = a === SELF_KEY;
+  const tie = selfTie(state.nodeMap.get(fromMe ? b : a));
+  const parts = [];
+  if (tie === 'mutual') parts.push('⇅ mutual');
+  else if (tie === 'sigues') parts.push(fromMe ? '↓ lo sigues' : '↑ lo sigues');
+  else if (tie === 'te sigue') parts.push(fromMe ? '↑ te sigue' : '↓ te sigue');
+  if (SELF_ID && state.nodeMap.has(SELF_ID)) {
+    const extra = relationLabel(a, b);
+    if (extra !== '·') parts.push(extra);
+  }
+  return parts.join(' · ') || '·';
+}
+
 // ─── D3 RENDERING ────────────────────────────────────────
 let svg, gZoom, gHulls, gLinks, gNodes, simulation, zoomBehavior;
 let allLinksSel, allNodesSel;
@@ -1238,18 +1300,18 @@ function relationLabel(a, b) {
 }
 
 function tracePath() {
-  const fromId = document.getElementById('pathFrom').value.trim().replace(/^@/, '');
-  const toId = document.getElementById('pathTo').value.trim().replace(/^@/, '');
+  const fromId = resolvePathInput(document.getElementById('pathFrom').value);
+  const toId = resolvePathInput(document.getElementById('pathTo').value);
   const out = document.getElementById('pathResult');
 
   if (!fromId || !toId) {
     out.innerHTML = '<div class="path-empty">enter two usernames to find connection</div>';
     return;
   }
-  if (!state.nodeMap.has(fromId)) { out.innerHTML = `<div class="path-fail">@${fromId} not in graph</div>`; return; }
-  if (!state.nodeMap.has(toId)) { out.innerHTML = `<div class="path-fail">@${toId} not in graph</div>`; return; }
+  if (!pathNodeExists(fromId)) { out.innerHTML = `<div class="path-fail">@${fromId} not in graph</div>`; return; }
+  if (!pathNodeExists(toId)) { out.innerHTML = `<div class="path-fail">@${toId} not in graph</div>`; return; }
 
-  const path = shortestPath(state.adj, fromId, toId);
+  const path = shortestPath(pathAdjacency(state.pathViaSelf), fromId, toId);
   if (!path) {
     out.innerHTML = `<div class="path-fail">no path · disconnected</div>`;
     state.pathIds = new Set();
@@ -1265,14 +1327,15 @@ function tracePath() {
   let html = `<div class="path-success">${hops} hop${hops !== 1 ? 's' : ''} · ${path.length} nodes</div>`;
   path.forEach((id, i) => {
     html += `<div class="path-step" data-id="${id}">
-      <span class="num">${String(i + 1).padStart(2, '0')}</span><span>@${id}</span>
+      <span class="num">${String(i + 1).padStart(2, '0')}</span><span>${pathName(id)}</span>
     </div>`;
-    if (i < path.length - 1) html += `<div class="path-arrow">${relationLabel(path[i], path[i + 1])}</div>`;
+    if (i < path.length - 1) html += `<div class="path-arrow">${pathRelationLabel(path[i], path[i + 1])}</div>`;
   });
   out.innerHTML = html;
   out.querySelectorAll('.path-step').forEach(el => {
     el.addEventListener('click', () => {
       const id = el.getAttribute('data-id');
+      if (!state.nodeMap.has(id)) return;   // el self virtual no tiene nodo en el 2D
       selectNode(id);
       focusNode(id);
     });
@@ -1328,6 +1391,11 @@ function wireDashboardUI() {
   const pathTo = document.getElementById('pathTo');
   document.getElementById('pathBtn').onclick = tracePath;
   document.getElementById('pathClearBtn').onclick = clearPath;
+  const via = document.getElementById('pathViaSelf');
+  if (via) {
+    via.checked = state.pathViaSelf;
+    via.onchange = () => { state.pathViaSelf = via.checked; if (state.pathOrdered.length) tracePath(); };
+  }
   pathFrom.onkeydown = (e) => { if (e.key === 'Enter') tracePath(); };
   pathTo.onkeydown = (e) => { if (e.key === 'Enter') tracePath(); };
 
