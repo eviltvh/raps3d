@@ -1,0 +1,126 @@
+/* ═══════════════════════════════════════════════════════════
+   POLPO :: GALAXY  ·  galaxy.css
+   Extras sobre styles.css para la vista 3D.
+   ═══════════════════════════════════════════════════════════ */
+
+.galaxy-container {
+  background: radial-gradient(ellipse at 50% 55%, #0d0d10 0%, #030304 70%, #000 100%);
+}
+
+.galaxy-stage {
+  position: absolute;
+  inset: 0;
+  cursor: grab;
+}
+.galaxy-stage:active { cursor: grabbing; }
+.galaxy-stage.hovering { cursor: pointer; }
+.galaxy-stage canvas { display: block; width: 100%; height: 100%; }
+
+/* etiquetas HTML proyectadas sobre el canvas */
+.galaxy-labels {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+  z-index: 3;
+}
+.g-label {
+  position: absolute;
+  left: 0; top: 0;
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--fg);
+  white-space: nowrap;
+  transform: translate(-50%, 0);
+  text-shadow: 0 0 3px #000, 0 0 6px #000;
+  will-change: transform, opacity;
+}
+.g-label.mutual { color: var(--accent); }
+.g-label.sel { color: var(--bg); background: var(--accent); padding: 1px 4px; font-weight: 700; }
+.g-label.path { color: var(--bg); background: var(--pink); padding: 1px 4px; }
+.g-label.net {
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  transform: translate(-50%, -50%);
+  padding: 2px 6px;
+  border: 1px solid currentColor;
+  background: rgba(0, 0, 0, 0.65);
+}
+.g-label.ring {
+  color: #6d6d6d;
+  font-size: 9px;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  transform: translate(4px, -50%);
+}
+.g-label.sun {
+  font-family: var(--serif);
+  font-style: italic;
+  font-size: 15px;
+  color: #fff3c4;
+  transform: translate(-50%, 0);
+}
+
+/* leyenda */
+.legend-sun {
+  width: 10px; height: 10px; border-radius: 50%;
+  background: radial-gradient(circle, #fff 0%, #ffe680 45%, #ff9d00 100%);
+  box-shadow: 0 0 6px #ffcc33;
+}
+.legend-ring {
+  width: 14px; height: 10px; border-radius: 50%;
+  border: 1px dashed #666;
+}
+.legend-toggle { cursor: pointer; display: flex; justify-content: space-between; gap: 12px; user-select: none; }
+.legend-toggle span { color: var(--accent); }
+.graph-legend.collapsed .legend-body { display: none; }
+.graph-legend.collapsed .legend-title { margin-bottom: 0; }
+
+.legend-hint {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 9px;
+  letter-spacing: 0.05em;
+}
+
+header .meta a.view-switch {
+  color: var(--fg);
+  text-decoration: none;
+  border: 1px solid var(--accent);
+  padding: 4px 10px;
+  letter-spacing: 0.15em;
+}
+header .meta a.view-switch:hover { background: var(--accent); color: var(--bg); }
+
+.demo-link { color: var(--accent); }
+
+.time-chip {
+  display: inline-block;
+  border: 1px solid var(--dim);
+  padding: 0 5px;
+  margin-left: 4px;
+  color: var(--muted);
+  font-size: 9px;
+}
+
+@media (max-width: 800px) {
+  html, body { overflow: auto; height: auto; }
+  .app { height: auto; min-height: 100vh; grid-template-rows: auto auto auto; }
+  .main-grid { grid-template-rows: auto auto; overflow: visible; }
+  .galaxy-container { height: 68vh; min-height: 380px; }
+  aside.sidebar { max-height: none; }
+  header .meta { gap: 8px; }
+  header .meta #metaUser { display: none; }
+  .stats { grid-template-columns: repeat(4, 1fr); }
+  .stat { padding: 8px 10px; }
+  .stat:nth-child(3) { border-right: 1px solid var(--dim); }
+  .stat:nth-child(4n) { border-right: none; }
+  .stat:nth-child(n+5) { border-top: 1px solid var(--dim); }
+  .stat-value { font-size: 18px; }
+  .stat-sub { display: none; }
+  .graph-legend { display: none; }
+  .graph-toolbar { left: 8px; right: 8px; top: 8px; gap: 4px; }
+  .graph-toolbar button { padding: 4px 6px; font-size: 8px; letter-spacing: 0.08em; }
+  .toolbar-sep { display: none; }
+}
